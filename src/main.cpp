@@ -121,6 +121,18 @@ uint8_t lastLen = 0;
 uint8_t lastRawThrottle = 0;
 uint8_t lastRawBrake = 0;
 
+// Dashboard's physical button (green wire, PIN_DASH_BUTTON), read as a raw GPIO level --
+// NOT part of the UART payload. ninebotdash.lisp's payload comment lists only
+// <bDataLen> <bThrottleLevel> <bBrakeLevel> <bIsUpdatingBLEFW> <bIsBeeping>, no button
+// field; and its commented-out "(gpio-configure 'pin-rx 'pin-mode-in-pu) ;configures rx
+// pin for button presses" confirms the button is read as its own input-pullup GPIO line,
+// active-low (pulled to GND when pressed).
+bool buttonPressed = false;
+
+void pollButton() {
+  buttonPressed = (digitalRead(PIN_DASH_BUTTON) == LOW);
+}
+
 // wChecksumLE = 0xFFFF xor (16-bit sum of bLen,bSrcAddr,bDstAddr,bCmd,bArg,payload[]),
 // transmitted low-byte-first. This is the formula documented in the reference script's
 // comments and correctly implemented by its send-dash-update(). Its calc-crc() (used for
@@ -376,6 +388,7 @@ void draw() {
   M5.Display.printf("raw  t=%3u b=%3u\n", Dash::lastRawThrottle, Dash::lastRawBrake);
   M5.Display.printf("rel  t=%.2f b=%.2f%s\n", Dash::throttleRel, Dash::brakeRel,
                      Dash::brakeActive ? " BRK" : "");
+  M5.Display.printf("BTN: %s\n", Dash::buttonPressed ? "PRESSED" : "NOT PRESSED");
   M5.Display.printf("rx=%lu err=%lu\n", (unsigned long)Dash::rxPacketCount,
                      (unsigned long)Dash::crcErrorCount);
   M5.Display.printf("age=%lums alive=%lu\n", (unsigned long)sinceRx,
@@ -396,7 +409,8 @@ void setup() {
   M5.begin(cfg);
   Serial.begin(115200);
 
-  pinMode(PIN_DASH_BUTTON, INPUT);  // defined for later use, not read yet
+  // Active-low: dashboard pulls this to GND when its physical button is pressed.
+  pinMode(PIN_DASH_BUTTON, INPUT_PULLUP);
 
   // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX, via the
   // raw ESP-IDF UART driver + open-drain override (see dashUartInit() above for why).
@@ -412,6 +426,7 @@ void loop() {
   M5.update();
 
   Dash::poll();
+  Dash::pollButton();
 
   if (Dash::newData) {
     Dash::newData = false;
