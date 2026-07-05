@@ -239,6 +239,15 @@ void sendStatusReply() {
   }
   Serial.println();
 
+  // EXPERIMENTAL: measured turnaround with no guard band was 230-450us -- CRC/structure
+  // confirmed correct by hand, so this tests whether the dashboard's own UART simply
+  // hasn't switched back to listening yet when our reply lands. Test value only; dial
+  // down (or remove) once we know whether/how much guard time this dashboard actually
+  // needs. Deliberately blocking -- this is a bus-turnaround requirement, not part of
+  // the main non-blocking relay loop, and only runs once per 0x64 reply.
+  constexpr uint32_t TX_GUARD_DELAY_US = 1500;
+  delayMicroseconds(TX_GUARD_DELAY_US);
+
   uart_write_bytes(DASH_UART_NUM, reinterpret_cast<const char*>(frame), i);
 }
 
