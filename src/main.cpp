@@ -341,6 +341,47 @@ void poll() {
   }
 }
 
+// One-shot startup diagnostic: sends a byte pattern that could never appear in real
+// dashboard traffic (0x5A/0xA5 are the only "special" bytes in this protocol) and
+// immediately checks our own RX for it. If it comes back, our open-drain TX is
+// definitely producing valid, receivable logic levels on the shared pad -- ruling the
+// TX path itself in as electrically functional. If it doesn't come back, that's a real
+// signal something is wrong with TX continuity/config, separate from protocol, timing,
+// or pull-up tuning (all already ruled out by direct testing).
+void loopbackSelfTest() {
+  static const uint8_t TEST_PATTERN[] = {0xAA, 0x55, 0xAA, 0x55, 0xAA};
+  constexpr size_t TEST_LEN = sizeof(TEST_PATTERN);
+
+  // Don't run this if the dashboard is already mid-transmission at boot -- would
+  // conflate real traffic with the test pattern.
+  size_t pending = 0;
+  uart_get_buffered_data_len(DASH_UART_NUM, &pending);
+  if (pending > 0) {
+    Serial.println("[DASH] Loopback self-test: skipped (dash already talking at boot)");
+    return;
+  }
+
+  uart_write_bytes(DASH_UART_NUM, reinterpret_cast<const char*>(TEST_PATTERN), TEST_LEN);
+
+  uint8_t rxBuf[TEST_LEN] = {0};
+  size_t rxCount = 0;
+  uint32_t deadline = millis() + 20;
+  while (rxCount < TEST_LEN && millis() < deadline) {
+    uint8_t b;
+    if (uart_read_bytes(DASH_UART_NUM, &b, 1, 0) == 1) {
+      rxBuf[rxCount++] = b;
+    }
+  }
+
+  bool match = (rxCount == TEST_LEN) && (memcmp(rxBuf, TEST_PATTERN, TEST_LEN) == 0);
+  Serial.printf("[DASH] Loopback self-test: sent %u bytes, got %u back:", (unsigned)TEST_LEN, (unsigned)rxCount);
+  for (size_t i = 0; i < rxCount; i++) {
+    Serial.printf(" %02X", rxBuf[i]);
+  }
+  Serial.println(match ? " -> PASS (TX reaches RX electrically)"
+                        : " -> FAIL (TX not looping back to RX -- check TX continuity/config)");
+}
+
 }  // namespace Dash
 
 // =============================================================================
@@ -484,6 +525,7 @@ void setup() {
   // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX, via the
   // raw ESP-IDF UART driver + open-drain override (see dashUartInit() above for why).
   dashUartInit();
+  Dash::loopbackSelfTest();
   VescSerial.begin(UART_BAUD, SERIAL_8N1, PIN_VESC_RX, PIN_VESC_TX);
 
   Screen::init();
