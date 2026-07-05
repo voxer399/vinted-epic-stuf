@@ -8,6 +8,8 @@
 #include <M5Unified.h>
 #include <HardwareSerial.h>
 #include <string.h>
+#include <driver/uart.h>
+#include <driver/gpio.h>
 
 // VESC UART has no relative brake command (only COMM_SET_CURRENT_BRAKE exists over
 // UART; the "_REL" relative brake variant is CAN-only, see CAN_PACKET_ID in
@@ -27,7 +29,44 @@ static constexpr int PIN_VESC_RX          = 0;  // <- VESC CONN6 TX/SCL
 
 static constexpr uint32_t UART_BAUD = 115200;
 
-HardwareSerial DashSerial(1);
+// The dashboard bus is single-wire half-duplex, so RX and TX share PIN_DASH_HALF_DUPLEX.
+// This is deliberately NOT a HardwareSerial: Arduino-ESP32's HardwareSerial/uartSetPins()
+// attaches RX and TX through its "peripheral manager" (periman), which tracks one bus
+// owner per pin -- attaching TX to a pin that periman already marked as UART_RX detaches
+// the RX assignment first. Passing the same pin for both rxPin/txPin to
+// HardwareSerial::begin() therefore silently ends up with only TX connected (confirmed
+// against arduino-esp32's esp32-hal-uart.c _uartAttachPins()/uartSetPins()), which matches
+// the observed symptom: dashboard Error 10, zero bytes ever received.
+//
+// ESP-IDF's own uart_set_pin() (components/esp_driver_uart/src/uart.c) explicitly supports
+// tx_io_num == rx_io_num: it detects tx_rx_same_io and routes both TX-out and RX-in through
+// the GPIO matrix onto the one pad. It does NOT configure open-drain though -- per ESP-IDF's
+// UART docs, sharing one wire between two drivers needs the pad set open-drain (+ pull-up)
+// or the two ends contending on the line can damage it. So we call the raw driver directly
+// (uart_driver_install/uart_param_config/uart_set_pin) and then override the pad to
+// open-drain + pull-up ourselves with gpio_set_direction()/gpio_set_pull_mode().
+static constexpr uart_port_t DASH_UART_NUM = UART_NUM_1;
+
+void dashUartInit() {
+  uart_config_t cfg = {};
+  cfg.baud_rate = UART_BAUD;
+  cfg.data_bits = UART_DATA_8_BITS;
+  cfg.parity = UART_PARITY_DISABLE;
+  cfg.stop_bits = UART_STOP_BITS_1;
+  cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+  cfg.source_clk = UART_SCLK_DEFAULT;
+
+  ESP_ERROR_CHECK(uart_driver_install(DASH_UART_NUM, 256, 0, 0, NULL, 0));
+  ESP_ERROR_CHECK(uart_param_config(DASH_UART_NUM, &cfg));
+  ESP_ERROR_CHECK(uart_set_pin(DASH_UART_NUM, PIN_DASH_HALF_DUPLEX, PIN_DASH_HALF_DUPLEX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+
+  // Override the pad uart_set_pin() just configured: open-drain so a TX '1' doesn't
+  // fight a dashboard-driven '0' (or vice versa), pull-up so the line idles high like
+  // a normal UART line when nobody is driving it.
+  gpio_set_direction((gpio_num_t)PIN_DASH_HALF_DUPLEX, GPIO_MODE_INPUT_OUTPUT_OD);
+  gpio_set_pull_mode((gpio_num_t)PIN_DASH_HALF_DUPLEX, GPIO_PULLUP_ONLY);
+}
+
 HardwareSerial VescSerial(2);
 
 // =============================================================================
@@ -145,13 +184,12 @@ void sendStatusReply() {
   frame[i++] = crc & 0xFF;
   frame[i++] = (crc >> 8) & 0xFF;
 
-  DashSerial.write(frame, i);
+  uart_write_bytes(DASH_UART_NUM, reinterpret_cast<const char*>(frame), i);
 }
 
 void poll() {
-  while (DashSerial.available()) {
-    uint8_t b = (uint8_t)DashSerial.read();
-
+  uint8_t b;
+  while (uart_read_bytes(DASH_UART_NUM, &b, 1, 0) == 1) {
     switch (state) {
       case RxState::WAIT_HEADER_0:
         if (b == HEADER_0) state = RxState::WAIT_HEADER_1;
@@ -358,8 +396,9 @@ void setup() {
 
   pinMode(PIN_DASH_BUTTON, INPUT);  // defined for later use, not read yet
 
-  // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX.
-  DashSerial.begin(UART_BAUD, SERIAL_8N1, PIN_DASH_HALF_DUPLEX, PIN_DASH_HALF_DUPLEX);
+  // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX, via the
+  // raw ESP-IDF UART driver + open-drain override (see dashUartInit() above for why).
+  dashUartInit();
   VescSerial.begin(UART_BAUD, SERIAL_8N1, PIN_VESC_RX, PIN_VESC_TX);
 
   Screen::init();
