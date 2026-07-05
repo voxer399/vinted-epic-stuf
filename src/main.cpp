@@ -124,6 +124,15 @@ uint8_t lastRawBrake = 0;
 // used to measure our reply turnaround time in sendStatusReply() (see below).
 uint32_t lastByteRxUs = 0;
 
+// EXPERIMENTAL: 0 when no reply is pending a self-echo check, else the millis() we
+// last transmitted a reply. poll() logs (without discarding or diverting) every raw
+// byte it reads for a short window after this timestamp, so we can empirically see
+// whether our own transmitted bytes are looping back into our own RX FIFO --
+// UART_MODE_RS485_HALF_DUPLEX was never enabled, so nothing currently suppresses our
+// receiver while we transmit on the shared pad.
+uint32_t lastTxMs = 0;
+constexpr uint32_t ECHO_CHECK_WINDOW_MS = 15;
+
 // wChecksumLE = 0xFFFF xor (16-bit sum of bLen,bSrcAddr,bDstAddr,bCmd,bArg,payload[]),
 // transmitted low-byte-first. This is the formula documented in the reference script's
 // comments and correctly implemented by its send-dash-update(). Its calc-crc() (used for
@@ -249,12 +258,25 @@ void sendStatusReply() {
   delayMicroseconds(TX_GUARD_DELAY_US);
 
   uart_write_bytes(DASH_UART_NUM, reinterpret_cast<const char*>(frame), i);
+  lastTxMs = millis();  // arms the post-TX echo-check window in poll()
 }
 
 void poll() {
   uint8_t b;
   while (uart_read_bytes(DASH_UART_NUM, &b, 1, 0) == 1) {
     lastByteRxUs = micros();
+
+    // EXPERIMENTAL: log (without altering parsing below) every raw byte seen shortly
+    // after our last TX, to empirically check for self-echo. Purely additive -- the
+    // switch statement below still processes this same byte normally either way.
+    if (lastTxMs != 0) {
+      uint32_t sinceTxMs = millis() - lastTxMs;
+      if (sinceTxMs < ECHO_CHECK_WINDOW_MS) {
+        Serial.printf("[DASH] post-TX byte @+%lums: %02X\n", (unsigned long)sinceTxMs, b);
+      } else {
+        lastTxMs = 0;  // window elapsed, stop logging until the next reply
+      }
+    }
     switch (state) {
       case RxState::WAIT_HEADER_0:
         if (b == HEADER_0) state = RxState::WAIT_HEADER_1;
