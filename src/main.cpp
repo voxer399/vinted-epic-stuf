@@ -72,6 +72,14 @@ bool brakeActive = false;
 volatile bool newData = false;
 uint32_t lastRxMs = 0;
 
+// Debug/telemetry state, purely for the on-screen display -- not used for relay logic.
+uint32_t rxPacketCount = 0;
+uint32_t crcErrorCount = 0;
+uint8_t lastCmd = 0;
+uint8_t lastLen = 0;
+uint8_t lastRawThrottle = 0;
+uint8_t lastRawBrake = 0;
+
 // wChecksumLE = 0xFFFF xor (16-bit sum of bLen,bSrcAddr,bDstAddr,bCmd,bArg,payload[]),
 // transmitted low-byte-first. This is the formula documented in the reference script's
 // comments and correctly implemented by its send-dash-update(). Its calc-crc() (used for
@@ -91,6 +99,8 @@ void decodeHallUpdate() {
   if (bLen < 3) return;
   uint8_t rawThrottle = payloadBuf[1];
   uint8_t rawBrake = payloadBuf[2];
+  lastRawThrottle = rawThrottle;
+  lastRawBrake = rawBrake;
 
   float t = (rawThrottle - THROTTLE_LOW) / THROTTLE_HIGH;
   throttleRel = (t > REL_DEADZONE) ? t : 0.0f;
@@ -181,7 +191,10 @@ void poll() {
           uint16_t expected = checksum(infoBuf, payloadBuf, bLen);
 
           if (received == expected) {
+            rxPacketCount++;
             uint8_t cmd = infoBuf[3];
+            lastCmd = cmd;
+            lastLen = bLen;
             if (cmd == CMD_STATUS_REQUEST) {
               // 0x64: dash wants a status reply; per reference comment it also
               // carries hall data, so decode it too.
@@ -192,6 +205,7 @@ void poll() {
               decodeHallUpdate();
             }
           } else {
+            crcErrorCount++;
             Serial.printf("[DASH] CRC mismatch: got %04X expected %04X\n", received, expected);
           }
 
@@ -279,12 +293,57 @@ void setBrakeCurrent(float amps) {
   sendPacket(payload, idx);
 }
 
+uint32_t aliveSentCount = 0;  // debug/telemetry only
+
 void sendAlive() {
   uint8_t payload[1] = {COMM_ALIVE};
   sendPacket(payload, 1);
+  aliveSentCount++;
 }
 
 }  // namespace Vesc
+
+// =============================================================================
+// On-screen debug display (M5StickC Plus2 LCD) -- purely for bring-up, not
+// part of the relay logic itself.
+// =============================================================================
+namespace Screen {
+
+constexpr uint32_t DRAW_INTERVAL_MS = 100;  // ~10 Hz, gated so it can't slow the relay loop
+constexpr uint32_t LINK_TIMEOUT_MS = 1000;  // no dash packet in this long -> show link down
+uint32_t lastDrawMs = 0;
+
+void init() {
+  M5.Display.setRotation(1);  // landscape
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.fillScreen(TFT_BLACK);
+}
+
+void draw() {
+  uint32_t now = millis();
+  if (now - lastDrawMs < DRAW_INTERVAL_MS) return;
+  lastDrawMs = now;
+
+  uint32_t sinceRx = now - Dash::lastRxMs;
+  bool linkUp = (Dash::lastRxMs != 0) && (sinceRx < LINK_TIMEOUT_MS);
+
+  M5.Display.startWrite();
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setCursor(0, 0);
+  M5.Display.printf("DASH: %s\n", linkUp ? "LINK" : "-----");
+  M5.Display.printf("cmd=%02X len=%u\n", Dash::lastCmd, Dash::lastLen);
+  M5.Display.printf("raw  t=%3u b=%3u\n", Dash::lastRawThrottle, Dash::lastRawBrake);
+  M5.Display.printf("rel  t=%.2f b=%.2f%s\n", Dash::throttleRel, Dash::brakeRel,
+                     Dash::brakeActive ? " BRK" : "");
+  M5.Display.printf("rx=%lu err=%lu\n", (unsigned long)Dash::rxPacketCount,
+                     (unsigned long)Dash::crcErrorCount);
+  M5.Display.printf("age=%lums alive=%lu\n", (unsigned long)sinceRx,
+                     (unsigned long)Vesc::aliveSentCount);
+  M5.Display.endWrite();
+}
+
+}  // namespace Screen
 
 // =============================================================================
 // Main relay loop
@@ -302,6 +361,8 @@ void setup() {
   // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX.
   DashSerial.begin(UART_BAUD, SERIAL_8N1, PIN_DASH_HALF_DUPLEX, PIN_DASH_HALF_DUPLEX);
   VescSerial.begin(UART_BAUD, SERIAL_8N1, PIN_VESC_RX, PIN_VESC_TX);
+
+  Screen::init();
 
   Serial.println("Ninebot G30 <-> VESC UART bridge starting");
 }
@@ -324,4 +385,6 @@ void loop() {
     lastAliveMs = now;
     Vesc::sendAlive();
   }
+
+  Screen::draw();
 }
