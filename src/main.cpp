@@ -23,7 +23,6 @@ static constexpr float MAX_BRAKE_CURRENT_A = 12.0f;
 
 // ---- Pin definitions (fixed by hardware wiring, do not change) ------------
 static constexpr int PIN_DASH_HALF_DUPLEX = 26; // Ninebot dash TX/RX, single-wire half-duplex
-static constexpr int PIN_DASH_BUTTON      = 36; // dash button (green) wire, unused for now
 static constexpr int PIN_VESC_TX          = 25; // -> VESC CONN6 RX/SDA
 static constexpr int PIN_VESC_RX          = 0;  // <- VESC CONN6 TX/SCL
 
@@ -121,18 +120,6 @@ uint8_t lastLen = 0;
 uint8_t lastRawThrottle = 0;
 uint8_t lastRawBrake = 0;
 
-// Dashboard's physical button (green wire, PIN_DASH_BUTTON), read as a raw GPIO level --
-// NOT part of the UART payload. ninebotdash.lisp's payload comment lists only
-// <bDataLen> <bThrottleLevel> <bBrakeLevel> <bIsUpdatingBLEFW> <bIsBeeping>, no button
-// field; and its commented-out "(gpio-configure 'pin-rx 'pin-mode-in-pu) ;configures rx
-// pin for button presses" confirms the button is read as its own input-pullup GPIO line,
-// active-low (pulled to GND when pressed).
-bool buttonPressed = false;
-
-void pollButton() {
-  buttonPressed = (digitalRead(PIN_DASH_BUTTON) == LOW);
-}
-
 // wChecksumLE = 0xFFFF xor (16-bit sum of bLen,bSrcAddr,bDstAddr,bCmd,bArg,payload[]),
 // transmitted low-byte-first. This is the formula documented in the reference script's
 // comments and correctly implemented by its send-dash-update(). Its calc-crc() (used for
@@ -173,7 +160,45 @@ void decodeHallUpdate() {
                 brakeActive ? " [BRAKE]" : "");
 }
 
+// Throttle/brake -> dashboard number-display + beeper feedback, via the fields
+// send-dash-update() in the reference actually writes: bSpeed (payload[4]) drives the
+// dash's own numeric display, so we show 99/88 there while throttle/brake is held. bBeeps
+// (payload[3]) is documented in the reference only as ";bBeeps - beeper", hardcoded to 0
+// everywhere with no working nonzero example -- its trigger semantics (level- vs
+// edge-triggered, flag vs pattern code) are NOT confirmed from the source. We assume the
+// most conservative reading (nonzero = beep on, zero = silent) and approximate a
+// fast/slow beep *pattern* with our own millis() oscillator, sampled whenever a reply
+// actually goes out (bounded by the dash's own 0x64 poll rate, which we don't control or
+// know). Continuous-while-fully-pressed should be reliable either way; the fast-vs-slow
+// pulse distinction is best-effort and needs verifying on real hardware. Brake takes
+// priority over throttle if both are pressed at once.
+constexpr float FULL_PRESS_THRESHOLD = 0.95f;
+constexpr uint32_t THROTTLE_PULSE_PERIOD_MS = 150;  // fast pulse, ~3.3 Hz on/off
+constexpr uint32_t BRAKE_PULSE_PERIOD_MS = 700;     // slow pulse, ~0.7 Hz on/off
+
+uint8_t feedbackSpeedByte = 0;
+bool feedbackBeepOn = false;
+
+void updateFeedback() {
+  uint32_t now = millis();
+
+  if (brakeActive) {
+    feedbackSpeedByte = 88;
+    bool full = brakeRel >= FULL_PRESS_THRESHOLD;
+    feedbackBeepOn = full || ((now % BRAKE_PULSE_PERIOD_MS) < (BRAKE_PULSE_PERIOD_MS / 2));
+  } else if (throttleRel > 0.0f) {
+    feedbackSpeedByte = 99;
+    bool full = throttleRel >= FULL_PRESS_THRESHOLD;
+    feedbackBeepOn = full || ((now % THROTTLE_PULSE_PERIOD_MS) < (THROTTLE_PULSE_PERIOD_MS / 2));
+  } else {
+    feedbackSpeedByte = 0;
+    feedbackBeepOn = false;
+  }
+}
+
 void sendStatusReply() {
+  updateFeedback();
+
   // Minimal 0x64 reply so the dashboard doesn't fault/disconnect.
   // Frame: 5A A5 <bLen=06> 20 21 64 00 <bFlags> <bBattLevel> <bHeadlightLevel> <bBeeps> <bSpeed> <bErrorCode> crcLo crcHi
   uint8_t info[5] = {0x06, ADDR_ESC, ADDR_DASH, CMD_STATUS_REQUEST, 0x00};
@@ -181,8 +206,8 @@ void sendStatusReply() {
   payload[0] = 0x04;  // bFlags: drive mode; no eco/sport/charge/off/lock/mph/hw-problem
   payload[1] = 100;   // bBattLevel: report full, VESC battery level not tracked yet
   payload[2] = 0;      // bHeadlightLevel
-  payload[3] = 0;      // bBeeps
-  payload[4] = 0;      // bSpeed (0.1 km/h units), not tracked yet
+  payload[3] = feedbackBeepOn ? 1 : 0;  // bBeeps
+  payload[4] = feedbackSpeedByte;        // bSpeed: 99/88 feedback, else pass-through (0, not tracked yet)
   payload[5] = 0;      // bErrorCode
 
   uint16_t crc = checksum(info, payload, sizeof(payload));
@@ -388,7 +413,6 @@ void draw() {
   M5.Display.printf("raw  t=%3u b=%3u\n", Dash::lastRawThrottle, Dash::lastRawBrake);
   M5.Display.printf("rel  t=%.2f b=%.2f%s\n", Dash::throttleRel, Dash::brakeRel,
                      Dash::brakeActive ? " BRK" : "");
-  M5.Display.printf("BTN: %s\n", Dash::buttonPressed ? "PRESSED" : "NOT PRESSED");
   M5.Display.printf("rx=%lu err=%lu\n", (unsigned long)Dash::rxPacketCount,
                      (unsigned long)Dash::crcErrorCount);
   M5.Display.printf("age=%lums alive=%lu\n", (unsigned long)sinceRx,
@@ -409,9 +433,6 @@ void setup() {
   M5.begin(cfg);
   Serial.begin(115200);
 
-  // Active-low: dashboard pulls this to GND when its physical button is pressed.
-  pinMode(PIN_DASH_BUTTON, INPUT_PULLUP);
-
   // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX, via the
   // raw ESP-IDF UART driver + open-drain override (see dashUartInit() above for why).
   dashUartInit();
@@ -426,7 +447,6 @@ void loop() {
   M5.update();
 
   Dash::poll();
-  Dash::pollButton();
 
   if (Dash::newData) {
     Dash::newData = false;
