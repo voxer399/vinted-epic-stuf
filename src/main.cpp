@@ -54,7 +54,9 @@ void dashUartInit() {
   cfg.parity = UART_PARITY_DISABLE;
   cfg.stop_bits = UART_STOP_BITS_1;
   cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-  cfg.source_clk = UART_SCLK_DEFAULT;
+  // UART_SCLK_DEFAULT isn't available in every ESP-IDF version this can build against;
+  // UART_SCLK_APB is the original-ESP32 clock source and has been valid since IDF v4.x.
+  cfg.source_clk = UART_SCLK_APB;
 
   ESP_ERROR_CHECK(uart_driver_install(DASH_UART_NUM, 256, 0, 0, NULL, 0));
   ESP_ERROR_CHECK(uart_param_config(DASH_UART_NUM, &cfg));
