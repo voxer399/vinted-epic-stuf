@@ -9,6 +9,16 @@
 #include <HardwareSerial.h>
 #include <string.h>
 
+// VESC UART has no relative brake command (only COMM_SET_CURRENT_BRAKE exists over
+// UART; the "_REL" relative brake variant is CAN-only, see CAN_PACKET_ID in
+// datatypes.h). So brake lever position is sent as an absolute amps value scaled
+// against this ceiling, not a 0-1 relative fraction.
+//
+// MUST stay at or below the VESC's configured Motor Current Max Brake (currently
+// -50A on this setup). Deliberately set low for first bench testing -- raise it
+// yourself once the relay is confirmed working correctly.
+static constexpr float MAX_BRAKE_CURRENT_A = 12.0f;
+
 // ---- Pin definitions (fixed by hardware wiring, do not change) ------------
 static constexpr int PIN_DASH_HALF_DUPLEX = 26; // Ninebot dash TX/RX, single-wire half-duplex
 static constexpr int PIN_DASH_BUTTON      = 36; // dash button (green) wire, unused for now
@@ -203,11 +213,6 @@ constexpr uint8_t COMM_SET_CURRENT_BRAKE = 7;
 constexpr uint8_t COMM_SET_CURRENT_REL = 84;
 constexpr uint8_t COMM_ALIVE = 30;
 
-// VESC UART has no relative brake command (comm/commands.c only implements
-// COMM_SET_CURRENT_BRAKE, an absolute amps value). Brake lever position is
-// scaled against this ceiling instead of a "rel" fraction. Tune to your setup.
-constexpr float MAX_BRAKE_CURRENT_A = 20.0f;
-
 // CRC-16/XMODEM (poly 0x1021, init 0), copied from util/crc.c.
 const uint16_t crc16_tab[256] = {
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7, 0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef,
@@ -310,7 +315,7 @@ void loop() {
     Dash::newData = false;
     Vesc::setCurrentRel(Dash::throttleRel);
     if (Dash::brakeActive) {
-      Vesc::setBrakeCurrent(Dash::brakeRel * Vesc::MAX_BRAKE_CURRENT_A);
+      Vesc::setBrakeCurrent(Dash::brakeRel * MAX_BRAKE_CURRENT_A);
     }
   }
 
