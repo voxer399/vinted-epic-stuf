@@ -120,6 +120,10 @@ uint8_t lastLen = 0;
 uint8_t lastRawThrottle = 0;
 uint8_t lastRawBrake = 0;
 
+// Timestamp of the most recently read byte from the dash UART, in microseconds --
+// used to measure our reply turnaround time in sendStatusReply() (see below).
+uint32_t lastByteRxUs = 0;
+
 // wChecksumLE = 0xFFFF xor (16-bit sum of bLen,bSrcAddr,bDstAddr,bCmd,bArg,payload[]),
 // transmitted low-byte-first. This is the formula documented in the reference script's
 // comments and correctly implemented by its send-dash-update(). Its calc-crc() (used for
@@ -223,12 +227,25 @@ void sendStatusReply() {
   frame[i++] = crc & 0xFF;
   frame[i++] = (crc >> 8) & 0xFF;
 
+  // Turnaround diagnostics: how long after the last byte of the incoming request was
+  // read do we start transmitting the reply, and exactly what bytes are we sending.
+  // Our dashUartInit() open-drain hack has no built-in half-duplex guard time (unlike
+  // hardware RS485 mode), so if this turnaround is too short the dashboard's own UART
+  // may not have switched back to listening yet when our reply hits the wire.
+  uint32_t turnaroundUs = micros() - lastByteRxUs;
+  Serial.printf("[DASH] TX turnaround=%luus frame:", (unsigned long)turnaroundUs);
+  for (size_t j = 0; j < i; j++) {
+    Serial.printf(" %02X", frame[j]);
+  }
+  Serial.println();
+
   uart_write_bytes(DASH_UART_NUM, reinterpret_cast<const char*>(frame), i);
 }
 
 void poll() {
   uint8_t b;
   while (uart_read_bytes(DASH_UART_NUM, &b, 1, 0) == 1) {
+    lastByteRxUs = micros();
     switch (state) {
       case RxState::WAIT_HEADER_0:
         if (b == HEADER_0) state = RxState::WAIT_HEADER_1;
