@@ -574,5 +574,9 @@ void loop() {
     Vesc::sendAlive();
   }
 
-  Screen::draw();
+  // EXPERIMENTAL: temporarily disabled to test whether Screen::draw()'s SPI redraw
+  // (fires every DRAW_INTERVAL_MS) stalls poll() long enough to occasionally miss the
+  // dashboard's reply deadline, given Error 10 has never once cleared even though most
+  // individual replies verify as correct. Re-enable once this is ruled in or out.
+  // Screen::draw();
 }
