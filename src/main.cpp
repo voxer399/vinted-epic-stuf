@@ -407,6 +407,29 @@ void loopbackSelfTest() {
   }
 
   Serial.println("[DASH] Loopback self-test: FAIL after all attempts (no confirmed electrical loopback)");
+
+  // Follow-up: sample the raw pad level directly (gpio_get_level(), bypassing the UART
+  // peripheral's own RX sampling entirely) during a fresh TX burst and count transitions.
+  // This tells us whether the pad is electrically toggling at all -- if it is, TX drive
+  // works and the fault is specifically in how our UART's RX side samples a shared pin;
+  // if the level never moves, TX isn't driving the pad at all.
+  uart_write_bytes(DASH_UART_NUM, reinterpret_cast<const char*>(TEST_PATTERN), TEST_LEN);
+  int lastLevel = gpio_get_level((gpio_num_t)PIN_DASH_HALF_DUPLEX);
+  int minLevel = lastLevel;
+  int maxLevel = lastLevel;
+  uint32_t transitions = 0;
+  uint32_t pollDeadlineUs = micros() + 1000;  // ~1ms, well over the ~435us physical TX time
+  while (micros() < pollDeadlineUs) {
+    int level = gpio_get_level((gpio_num_t)PIN_DASH_HALF_DUPLEX);
+    if (level != lastLevel) {
+      transitions++;
+      lastLevel = level;
+    }
+    if (level < minLevel) minLevel = level;
+    if (level > maxLevel) maxLevel = level;
+  }
+  Serial.printf("[DASH] Loopback self-test: raw pad transitions during TX = %lu (level range %d-%d)\n",
+                (unsigned long)transitions, minLevel, maxLevel);
 }
 
 }  // namespace Dash
