@@ -320,14 +320,17 @@ void poll() {
             uint8_t cmd = infoBuf[3];
             lastCmd = cmd;
             lastLen = bLen;
-            if (cmd == CMD_STATUS_REQUEST) {
-              // 0x64: dash wants a status reply; per reference comment it also
-              // carries hall data, so decode it too.
+            // EXPERIMENTAL: the reference script's dispatch is two independent `if`s
+            // (not `cond`), which -- worked through -- actually calls both
+            // send-dash-update() and process_hall_update() for EITHER 0x64 or 0x65,
+            // contradicting its own comments ("0x65 does not expect a reply"). We'd
+            // previously followed the commented intent (reply only to 0x64); this
+            // instead matches the reference's literal runtime behavior, since the
+            // dashboard sends ~4x more 0x65 than 0x64 and we were only ever replying
+            // to ~20% of its traffic.
+            if (cmd == CMD_STATUS_REQUEST || cmd == CMD_HALL_UPDATE) {
               decodeHallUpdate();
               sendStatusReply();
-            } else if (cmd == CMD_HALL_UPDATE) {
-              // 0x65: hall data only, no reply expected.
-              decodeHallUpdate();
             }
           } else {
             crcErrorCount++;
