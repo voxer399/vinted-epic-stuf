@@ -42,8 +42,20 @@ static constexpr uint32_t UART_BAUD = 115200;
 // the GPIO matrix onto the one pad. It does NOT configure open-drain though -- per ESP-IDF's
 // UART docs, sharing one wire between two drivers needs the pad set open-drain (+ pull-up)
 // or the two ends contending on the line can damage it. So we call the raw driver directly
-// (uart_driver_install/uart_param_config/uart_set_pin) and then override the pad to
-// open-drain + pull-up ourselves with gpio_set_direction()/gpio_set_pull_mode().
+// (uart_driver_install/uart_param_config/uart_set_pin) and override the pad to open-drain
+// + pull-up ourselves with gpio_set_direction()/gpio_set_pull_mode().
+//
+// ORDERING BUG FOUND ON HARDWARE: we originally called gpio_set_direction()/
+// gpio_set_pull_mode() *after* uart_set_pin(). A live loopback test (send a known pattern,
+// poll gpio_get_level() directly on the pad during TX) showed zero transitions -- the pad
+// never left logic-high while "transmitting". gpio_set_direction() is a broader
+// reconfiguration than it looks (equivalent to gpio_config()) and evidently cleared the
+// matrix routing uart_set_pin() had just established, leaving the UART peripheral
+// internally "transmitting" into a pad that was no longer actually wired to it. RX kept
+// working because the input-routing register uart_set_pin() sets is separate from the
+// output-enable/function-select state gpio_set_direction() touches.
+// Fix: configure open-drain + pull-up FIRST, then call uart_set_pin() LAST, so the UART's
+// own matrix wiring is the final thing touching the pin and can't be clobbered afterward.
 static constexpr uart_port_t DASH_UART_NUM = UART_NUM_1;
 
 void dashUartInit() {
@@ -59,13 +71,14 @@ void dashUartInit() {
 
   ESP_ERROR_CHECK(uart_driver_install(DASH_UART_NUM, 256, 0, 0, NULL, 0));
   ESP_ERROR_CHECK(uart_param_config(DASH_UART_NUM, &cfg));
-  ESP_ERROR_CHECK(uart_set_pin(DASH_UART_NUM, PIN_DASH_HALF_DUPLEX, PIN_DASH_HALF_DUPLEX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-  // Override the pad uart_set_pin() just configured: open-drain so a TX '1' doesn't
-  // fight a dashboard-driven '0' (or vice versa), pull-up so the line idles high like
-  // a normal UART line when nobody is driving it.
+  // Open-drain so a TX '1' doesn't fight a dashboard-driven '0' (or vice versa), pull-up
+  // so the line idles high like a normal UART line when nobody is driving it. Must happen
+  // BEFORE uart_set_pin() -- see ordering note above.
   gpio_set_direction((gpio_num_t)PIN_DASH_HALF_DUPLEX, GPIO_MODE_INPUT_OUTPUT_OD);
   gpio_set_pull_mode((gpio_num_t)PIN_DASH_HALF_DUPLEX, GPIO_PULLUP_ONLY);
+
+  ESP_ERROR_CHECK(uart_set_pin(DASH_UART_NUM, PIN_DASH_HALF_DUPLEX, PIN_DASH_HALF_DUPLEX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 }
 
 HardwareSerial VescSerial(2);
