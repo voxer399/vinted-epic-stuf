@@ -344,19 +344,24 @@ void poll() {
   }
 }
 
-// One-shot startup diagnostic: sends a byte pattern that could never appear in real
-// dashboard traffic (0x5A/0xA5 are the only "special" bytes in this protocol) and
-// immediately checks our own RX for it. If it comes back, our open-drain TX is
-// definitely producing valid, receivable logic levels on the shared pad -- ruling the
-// TX path itself in as electrically functional. If it doesn't come back, that's a real
-// signal something is wrong with TX continuity/config, separate from protocol, timing,
-// or pull-up tuning (all already ruled out by direct testing).
+// Periodic diagnostic (was one-shot at boot, but that made it impossible to catch in
+// the Serial Monitor unless you were already attached before the board booted): sends
+// a byte pattern that could never appear in real dashboard traffic (0x5A/0xA5 are the
+// only "special" bytes in this protocol) and immediately checks our own RX for it. If
+// it comes back, our open-drain TX is definitely producing valid, receivable logic
+// levels on the shared pad -- ruling the TX path itself in as electrically functional.
+// If it doesn't come back, that's a real signal something is wrong with TX
+// continuity/config, separate from protocol, timing, or pull-up tuning (all already
+// ruled out by direct testing).
 //
 // This dashboard talks fast enough (a full request/reply burst every few ms) that a
 // generous listen window reliably catches real dashboard bytes racing into it -- that's
 // not a failed loopback, it's contamination. So: a short window (our 5-byte pattern only
 // needs ~435us to physically clock out at 115200 baud), and explicit retries whenever
 // what comes back looks like real traffic rather than silence or our own pattern.
+constexpr uint32_t LOOPBACK_TEST_INTERVAL_MS = 5000;
+uint32_t lastLoopbackTestMs = 0;
+
 void loopbackSelfTest() {
   static const uint8_t TEST_PATTERN[] = {0xAA, 0x55, 0xAA, 0x55, 0xAA};
   constexpr size_t TEST_LEN = sizeof(TEST_PATTERN);
@@ -547,7 +552,6 @@ void setup() {
   // Dashboard bus is single-wire half-duplex: same GPIO used for RX and TX, via the
   // raw ESP-IDF UART driver + open-drain override (see dashUartInit() above for why).
   dashUartInit();
-  Dash::loopbackSelfTest();
   VescSerial.begin(UART_BAUD, SERIAL_8N1, PIN_VESC_RX, PIN_VESC_TX);
 
   Screen::init();
@@ -572,6 +576,11 @@ void loop() {
   if (now - lastAliveMs >= ALIVE_INTERVAL_MS) {
     lastAliveMs = now;
     Vesc::sendAlive();
+  }
+
+  if (now - Dash::lastLoopbackTestMs >= Dash::LOOPBACK_TEST_INTERVAL_MS) {
+    Dash::lastLoopbackTestMs = now;
+    Dash::loopbackSelfTest();
   }
 
   // EXPERIMENTAL: temporarily disabled to test whether Screen::draw()'s SPI redraw
