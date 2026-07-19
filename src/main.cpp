@@ -445,6 +445,38 @@ void loopbackSelfTest() {
                 (unsigned long)transitions, minLevel, maxLevel);
 }
 
+// Bypasses the UART peripheral and the GPIO matrix routing entirely: detaches the pin
+// from UART, drives it with plain gpio_set_level(), and reads back gpio_get_level().
+// If this can't pull the pad low either, the fault is below the UART layer -- either the
+// pin/pad itself, or something external (e.g. a low-impedance driver on the dashboard side
+// fighting our open-drain output) is holding the line high regardless of what peripheral
+// is asking for low.
+void gpioBitBangTest() {
+  uart_driver_delete(DASH_UART_NUM);
+
+  gpio_set_direction((gpio_num_t)PIN_DASH_HALF_DUPLEX, GPIO_MODE_INPUT_OUTPUT_OD);
+  gpio_set_pull_mode((gpio_num_t)PIN_DASH_HALF_DUPLEX, GPIO_PULLUP_ONLY);
+
+  gpio_set_level((gpio_num_t)PIN_DASH_HALF_DUPLEX, 0);
+  delayMicroseconds(50);
+  int lowReadback = gpio_get_level((gpio_num_t)PIN_DASH_HALF_DUPLEX);
+
+  gpio_set_level((gpio_num_t)PIN_DASH_HALF_DUPLEX, 1);
+  delayMicroseconds(50);
+  int highReadback = gpio_get_level((gpio_num_t)PIN_DASH_HALF_DUPLEX);
+
+  Serial.printf("[DASH] GPIO bit-bang test (UART detached): set 0 -> read %d, set 1 -> read %d\n",
+                lowReadback, highReadback);
+  if (lowReadback == 0 && highReadback == 1) {
+    Serial.println("[DASH] GPIO bit-bang test: PASS (pin drives both levels -- fault is UART/GPIO-matrix specific)");
+  } else {
+    Serial.println("[DASH] GPIO bit-bang test: FAIL (pin/pad cannot be driven low -- something external is holding it high, or the pad itself is broken)");
+  }
+
+  // Restore normal operation: re-init the UART driver on this pin.
+  dashUartInit();
+}
+
 }  // namespace Dash
 
 // =============================================================================
@@ -617,6 +649,7 @@ void loop() {
   if (now - Dash::lastLoopbackTestMs >= Dash::LOOPBACK_TEST_INTERVAL_MS) {
     Dash::lastLoopbackTestMs = now;
     Dash::loopbackSelfTest();
+    Dash::gpioBitBangTest();
   }
 
   // EXPERIMENTAL: temporarily disabled to test whether Screen::draw()'s SPI redraw
